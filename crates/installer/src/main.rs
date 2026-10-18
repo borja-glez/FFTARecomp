@@ -297,23 +297,32 @@ fn parse_frac(s: &str) -> Option<(u32, u32)> {
 
 #[cfg(windows)]
 fn create_shortcut(dir: &Path) {
+    // Native IShellLinkW, the same object WScript.Shell wraps; no PowerShell process.
+    use windows::core::{Interface, HSTRING};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     let Some(desktop) = dirs::desktop_dir() else { return };
     let exe = dir.join(PLAYER_EXE);
     let lnk = desktop.join(format!("{APP_NAME}.lnk"));
-    let q = |p: &Path| p.display().to_string().replace('\'', "''");
-    let script = format!(
-        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');\
-         $s.TargetPath='{}';$s.WorkingDirectory='{}';$s.IconLocation='{},0';$s.Save()",
-        q(&lnk), q(&exe), q(dir), q(&exe)
-    );
-    let mut cmd = Command::new("powershell");
-    cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+    unsafe {
+        // Runs on the install worker thread, which has no COM apartment yet.
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let save = || -> windows::core::Result<()> {
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            link.SetPath(&HSTRING::from(exe.as_path()))?;
+            link.SetWorkingDirectory(&HSTRING::from(dir))?;
+            link.SetIconLocation(&HSTRING::from(exe.as_path()), 0)?;
+            link.cast::<IPersistFile>()?.Save(&HSTRING::from(lnk.as_path()), true)
+        };
+        // Like before, a missing shortcut never fails the installation.
+        let _ = save();
+        if initialized {
+            CoUninitialize();
+        }
     }
-    let _ = cmd.status();
 }
 
 #[cfg(target_os="linux")]
