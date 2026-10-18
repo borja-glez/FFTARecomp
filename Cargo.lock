@@ -2991,6 +2991,7 @@ dependencies = [
  "rfd 0.15.4",
  "sha1",
  "sha2 0.11.0",
+ "windows 0.62.2",
  "winresource",
 ]
 
