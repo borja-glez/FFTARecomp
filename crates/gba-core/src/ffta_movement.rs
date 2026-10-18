@@ -13,9 +13,7 @@ impl MovementState {
     pub fn new(rom:&[u8])->Self {
         let enabled=std::env::var("FFTA_PATCH_BG").as_deref()!=Ok("0")
             && std::env::var("FFTA_PATCH_MOVEMENT").as_deref()!=Ok("0")
-            && crate::ffta_rom::eligible(rom)
-            && rom.get(0x1af08..0x1b5d0).is_some_and(|b|
-                crate::ffta_rom::digest(b)=="ce26cfe5654123ddf633d32314054c816d6a70315473dcc86928d5cef7237f2c");
+            && crate::ffta_rom::profile(rom).is_some_and(|p|p.verify_terrain(rom));
         Self{enabled,..Self::default()}
     }
     pub fn observe_dma(&mut self,src:u32,dst:u32,count:u32,unit:u32,control:u16,ewram:&[u8],vram:&[u8]) {

@@ -23,6 +23,8 @@ pub struct HostSprite {
 pub struct SpriteState {
     pub enabled: bool,
     rom_valid:bool,
+    /// Verified image layout (USA or EUR); None leaves every hook inactive.
+    profile:Option<&'static crate::ffta_rom::Profile>,
     observed_pending:BTreeMap<u32,Vec<HostSprite>>,
     pub oam_owners:Vec<u32>,
     pub pixel_counts:BTreeMap<u32,u32>,
@@ -45,10 +47,11 @@ pub struct SpriteState {
 }
 impl SpriteState {
     pub fn new(rom: &[u8]) -> Self {
-        let valid=crate::ffta_rom::eligible(rom);
+        let profile=crate::ffta_rom::profile(rom);
+        let valid=profile.is_some();
         Self { enabled: std::env::var("FFTA_PATCH_SPR").as_deref() != Ok("0")
-            && valid,rom_valid:valid,oam_owners:vec![0;128],
-            vis_enabled:std::env::var("FFTA_PATCH_VIS").as_deref()!=Ok("0") && crate::ffta_rom::verify_visibility(rom),
+            && valid,rom_valid:valid,profile,oam_owners:vec![0;128],
+            vis_enabled:std::env::var("FFTA_PATCH_VIS").as_deref()!=Ok("0") && profile.is_some_and(|p|p.verify_visibility(rom)),
             ..Self::default() }
     }
     pub fn publish(&mut self, src: u32, dst: u32, bytes: usize, wide: bool, oam: &[u8]) {
@@ -162,9 +165,10 @@ pub fn trace_frame(bus:&crate::mem::MemMap) {
             }
         }
     }
-    if bus.frames==10500 {
-        println!("FFTA_RAM_ID frame={} ram=030062ec rom=08a38ea0 length=296 equal={} sha256={}",bus.frames,
-            bus.rom.get(0xa38ea0..0xa38fc8).is_some_and(|original|bus.iwram[0x62ec..0x6414]==*original),crate::ffta_rom::digest(&bus.iwram[0x62ec..0x6414]));
+    if let (10500,Some(profile))=(bus.frames,bus.ffta_sprites.profile) {
+        let (start,end)=profile.vis_source;
+        println!("FFTA_RAM_ID frame={} ram=030062ec rom={:08x} length=296 equal={} sha256={}",bus.frames,0x08000000+start,
+            bus.rom.get(start..end).is_some_and(|original|bus.iwram[0x62ec..0x6414]==*original),crate::ffta_rom::digest(&bus.iwram[0x62ec..0x6414]));
     }
     let reg=|off|u16::from_le_bytes([bus.io[off],bus.io[off+1]]);
     println!("FFTA_FRAME frame={} camera={:?} bgcnt={:04x},{:04x},{:04x},{:04x} host={} publications={} mismatches={}",
@@ -245,8 +249,8 @@ pub fn trace_frame(bus:&crate::mem::MemMap) {
 }
 
 /// Own decoder of the measured six-byte descriptor ABI. Never writes guest memory.
-fn decode(mem: &crate::mem::MemMap, regs: &[u32; 16]) -> Option<(u32, Vec<HostSprite>)> {
-    let first = regs[15] == 0x080014c8;
+fn decode(mem: &crate::mem::MemMap, regs: &[u32; 16], profile: &crate::ffta_rom::Profile) -> Option<(u32, Vec<HostSprite>)> {
+    let first = regs[15] == profile.spr_first;
     let arg = |offset| word(mem, regs[13].wrapping_add(offset));
     let (tile_add, prio_add, pal_add, buffer, limit, initial, flags) = if first {
         (arg(0)?, arg(4)?, arg(8)?, arg(12)?, arg(16)?, arg(20)?, regs[3])
@@ -268,7 +272,7 @@ fn decode(mem: &crate::mem::MemMap, regs: &[u32; 16]) -> Option<(u32, Vec<HostSp
         let mut a0 = u16::from_le_bytes([bytes[0], bytes[1]]);
         let mut a1 = u16::from_le_bytes([bytes[2], bytes[3]]);
         let mut a2 = u16::from_le_bytes([bytes[4], bytes[5]]);
-        let dim = 0x08149510 + 4 * (((a0 >> 14) * 4 + (a1 >> 14)) as u32);
+        let dim = profile.dims + 4 * (((a0 >> 14) * 4 + (a1 >> 14)) as u32);
         let size = peek(mem, dim, 4)?;
         let w = u16::from_le_bytes([size[0], size[1]]) as i32;
         let h = u16::from_le_bytes([size[2], size[3]]) as i32;
@@ -299,7 +303,7 @@ fn decode(mem: &crate::mem::MemMap, regs: &[u32; 16]) -> Option<(u32, Vec<HostSp
         let prio = ((a2 as u32 >> 10) & 3).wrapping_add(prio_add) & 3;
         let pal = (a2 as u32 >> 12).wrapping_add(pal_add) & 15;
         a2 = (tile | (prio << 10) | (pal << 12)) as u16;
-        let stats_background = regs[0]==0x083916fa && count==4
+        let stats_background = profile.stats_list==Some(regs[0]) && count==4
             && a0&0x0c00==0x0400 && a2>>12==11
             && matches!(a2&1023,0x1f0|0x200|0x208) && stats_panel_enabled();
         sprites.push(HostSprite { x, y, attrs: [a0, a1, a2], stats_background, slot, replaces,..HostSprite::default() });
@@ -364,10 +368,11 @@ fn decode_battle(mem: &crate::mem::MemMap, regs: &[u32;16]) -> Option<(u32, Vec<
 }
 impl crate::machine::Machine {
     pub fn ffta_observe_native_producer(&mut self,pc:u32) {
+        let Some(profile)=self.bus.ffta_sprites.profile else {return;};
         if self.bus.ffta_sprites.enabled || !self.bus.ffta_sprites.rom_valid || !trace_enabled(self.bus.frames)
-            || !matches!(pc,0x080014c8 | 0x080016d4 | 0x030065a8) {return;}
+            || !profile.producer(pc) {return;}
         let mut regs=self.cpu.regs;regs[15]=pc;
-        let decoded=if pc==0x030065a8 {decode_battle(&self.bus,&regs)}else{decode(&self.bus,&regs)};
+        let decoded=if pc==0x030065a8 {decode_battle(&self.bus,&regs)}else{decode(&self.bus,&regs,profile)};
         if let Some((buffer,objects))=decoded {
             let pending=self.bus.ffta_sprites.observed_pending.entry(buffer).or_default();
             if objects.first().is_some_and(|s|s.slot==0) {pending.clear();}
@@ -375,11 +380,12 @@ impl crate::machine::Machine {
         }
     }
     pub fn ffta_visibility_entry(&mut self) {
+        let Some(profile)=self.bus.ffta_sprites.profile else {return;};
         if !self.bus.ffta_sprites.enabled || !self.bus.ffta_sprites.vis_enabled || crate::mem::extra()==0 || !self.cpu.thumb() {return;}
         let key=(self.cpu.regs[13],self.cpu.cpsr&31);
         if self.cpu.regs[15]==crate::ffta_rom::VIS_START {
-            self.bus.ffta_sprites.vis_verified=self.bus.iwram.get(0x62ec..0x6414)==self.bus.rom.get(crate::ffta_rom::VIS_SOURCE_START..crate::ffta_rom::VIS_SOURCE_END)
-                && self.bus.iwram.get(0x6d28..0x6d58)==self.bus.rom.get(0xa398dc..0xa3990c);
+            self.bus.ffta_sprites.vis_verified=self.bus.iwram.get(0x62ec..0x6414)==self.bus.rom.get(profile.vis_source.0..profile.vis_source.1)
+                && self.bus.iwram.get(0x6d28..0x6d58)==self.bus.rom.get(profile.dims_source.0..profile.dims_source.1);
             if self.bus.ffta_sprites.vis_verified {
                 if let Some(result)=visibility_result(&self.bus,&self.cpu.regs,crate::mem::extra()) {
                     self.bus.ffta_sprites.visibility_calls.insert(key,(result,self.cpu.regs[1] as i32,self.cpu.regs[2] as i32,self.cpu.regs[0],self.cpu.regs[14]));
@@ -394,31 +400,33 @@ impl crate::machine::Machine {
     }
     /// Native blocks use the same interpreter, memory and instruction timing as step().
     pub fn ffta_sprite_interpret(&mut self, pc: u32) -> bool {
+        let Some(profile)=self.bus.ffta_sprites.profile else {return false;};
         if !self.bus.ffta_sprites.enabled || !self.cpu.thumb() {return false;}
         if (crate::ffta_rom::VIS_START..crate::ffta_rom::VIS_END).contains(&pc) {
             if !self.bus.ffta_sprites.vis_enabled || crate::mem::extra()==0 {return false;}
             if pc==crate::ffta_rom::VIS_START {
-                self.bus.ffta_sprites.vis_verified=self.bus.iwram.get(0x62ec..0x6414)==self.bus.rom.get(crate::ffta_rom::VIS_SOURCE_START..crate::ffta_rom::VIS_SOURCE_END);
+                self.bus.ffta_sprites.vis_verified=self.bus.iwram.get(0x62ec..0x6414)==self.bus.rom.get(profile.vis_source.0..profile.vis_source.1);
             }
             return self.bus.ffta_sprites.vis_verified;
         }
         if pc==crate::ffta_rom::RAM_SPRITE_START {
             self.bus.ffta_sprites.ram_verified = self.bus.iwram.get(0x65a8..0x68a4)
-                == self.bus.rom.get(crate::ffta_rom::RAM_SOURCE_START..crate::ffta_rom::RAM_SOURCE_END)
-                && self.bus.iwram.get(0x6d28..0x6d58)==self.bus.rom.get(0xa398dc..0xa3990c);
+                == self.bus.rom.get(profile.ram_source.0..profile.ram_source.1)
+                && self.bus.iwram.get(0x6d28..0x6d58)==self.bus.rom.get(profile.dims_source.0..profile.dims_source.1);
         }
         if (crate::ffta_rom::RAM_SPRITE_START..crate::ffta_rom::RAM_SPRITE_END).contains(&pc) {
             return self.bus.ffta_sprites.ram_verified;
         }
-        crate::ffta_rom::sprite_pc(pc)
+        profile.sprite_pc(pc)
     }
     pub fn ffta_sprite_entry(&mut self) {
         if !self.bus.ffta_sprites.enabled {
             self.ffta_observe_native_producer(self.cpu.regs[15]);
             return;
         }
+        let Some(profile)=self.bus.ffta_sprites.profile else {return;};
         if self.ffta_sprite_interpret(self.cpu.regs[15])
-            && matches!(self.cpu.regs[15], 0x080014c8 | 0x080016d4 | 0x030065a8) {
+            && profile.producer(self.cpu.regs[15]) {
             self.bus.ffta_sprites.calls += 1;
             if trace_enabled(self.bus.frames) {
                 if self.cpu.regs[15]==crate::ffta_rom::RAM_SPRITE_START {
@@ -433,7 +441,7 @@ impl crate::machine::Machine {
             if crate::mem::extra() > 0 || trace_enabled(self.bus.frames) {
                 let decoded = if self.cpu.regs[15]==crate::ffta_rom::RAM_SPRITE_START {
                     decode_battle(&self.bus,&self.cpu.regs)
-                } else {decode(&self.bus,&self.cpu.regs)};
+                } else {decode(&self.bus,&self.cpu.regs,profile)};
                 if let Some((buffer, mut sprites)) = decoded {
                     for sprite in &mut sprites {sprite.group=(self.bus.frames<<32)|self.bus.ffta_sprites.calls;}
                     if trace_enabled(self.bus.frames) {
@@ -477,7 +485,7 @@ impl crate::machine::Machine {
                     pending.1.extend(sprites);
                 } else {
                     self.bus.ffta_sprites.failed_buffer = word(&self.bus, self.cpu.regs[13].wrapping_add(
-                        if self.cpu.regs[15] == 0x080014c8 {12} else {8}));
+                        if self.cpu.regs[15] == profile.spr_first {12} else {8}));
                 }
             }
         }
@@ -561,12 +569,13 @@ mod tests {
     #[ignore = "requires user-owned ROM via FFTA_TEST_ROM"]
     fn visibility_original_result_matches_user_rom() {
         let rom=std::fs::read(std::env::var("FFTA_TEST_ROM").unwrap()).unwrap();
-        assert!(crate::ffta_rom::eligible(&rom));assert!(crate::ffta_rom::verify_visibility(&rom));
+        let profile=crate::ffta_rom::profile(&rom).expect("verified USA or EUR image");
+        assert!(profile.verify_visibility(&rom));
         let mut cases=0;
         for x in [-200,-10,-7,0,239,240,700] {for y in [-40,0,50,159,180] {for flip in [0,1] {
             let mut m=Machine::new(rom.clone());m.bus.ffta_sprites.enabled=false;
-            m.bus.iwram[0x62ec..0x6414].copy_from_slice(&rom[crate::ffta_rom::VIS_SOURCE_START..crate::ffta_rom::VIS_SOURCE_END]);
-            m.bus.iwram[0x6d28..0x6d58].copy_from_slice(&rom[0xa398dc..0xa3990c]);
+            m.bus.iwram[0x62ec..0x6414].copy_from_slice(&rom[profile.vis_source.0..profile.vis_source.1]);
+            m.bus.iwram[0x6d28..0x6d58].copy_from_slice(&rom[profile.dims_source.0..profile.dims_source.1]);
             m.cpu.cpsr|=crate::cpu::FLAG_T;
             m.cpu.regs[0]=0x02000000;m.cpu.regs[1]=x as u32;m.cpu.regs[2]=y as u32;m.cpu.regs[3]=flip;
             m.cpu.regs[13]=0x03007000;m.cpu.regs[14]=0x08002001;m.cpu.regs[15]=crate::ffta_rom::VIS_START;
@@ -584,8 +593,8 @@ mod tests {
     fn ffta_decoder_matches_original_and_keeps_rejected_objects() {
         let path = std::env::var("FFTA_TEST_ROM").expect("FFTA_TEST_ROM");
         let rom = std::fs::read(path).unwrap();
-        assert!(crate::ffta_rom::eligible(&rom));
-        for pc in [0x080014c8, 0x080016d4] {
+        let profile = crate::ffta_rom::profile(&rom).expect("verified USA or EUR image");
+        for pc in [profile.spr_first, profile.spr_second] {
             for buffer in [0x03000030,0x03002c58,0x03002dd8] {
             for flags in [0, 0x10000000, 0x20000000, 0x30000400] {
                 let mut m = Machine::new(rom.clone());
@@ -594,11 +603,11 @@ mod tests {
                 m.cpu.regs[0] = 0x02000000;
                 m.cpu.regs[1] = 100;
                 m.cpu.regs[2] = 70;
-                m.cpu.regs[3] = if pc == 0x080014c8 { flags } else { 7 };
+                m.cpu.regs[3] = if pc == profile.spr_first { flags } else { 7 };
                 m.cpu.regs[13] = 0x03007000;
                 m.cpu.regs[14] = 0x08002001;
                 m.cpu.regs[15] = pc;
-                let args = if pc == 0x080014c8 { vec![7, 2, 3, buffer, 48, 0] }
+                let args = if pc == profile.spr_first { vec![7, 2, 3, buffer, 48, 0] }
                     else { vec![2, 3, buffer, 48, 0] };
                 for (i, v) in args.into_iter().enumerate() {
                     m.bus.write32(m.cpu.regs[13] + i as u32 * 4, v);
@@ -612,7 +621,7 @@ mod tests {
                     m.bus.write16(p+2, x | ((i % 4) as u16 * 0x4000));
                     m.bus.write16(p+4, (i as u16) | 0x7400);
                 }
-                let (_, objects) = decode(&m.bus, &m.cpu.regs).unwrap();
+                let (_, objects) = decode(&m.bus, &m.cpu.regs, profile).unwrap();
                 assert_eq!(objects.len(), 200);
                 assert!(objects.iter().filter(|o| !o.replaces).count() >= 152);
                 let mut steps = 0;
@@ -632,15 +641,15 @@ mod tests {
     #[ignore = "requires user-owned ROM via FFTA_TEST_ROM; embeds no ROM bytes"]
     fn ffta_ram_battle_decoder_matches_original() {
         let rom=std::fs::read(std::env::var("FFTA_TEST_ROM").expect("FFTA_TEST_ROM")).unwrap();
-        assert!(crate::ffta_rom::eligible(&rom));
+        let profile=crate::ffta_rom::profile(&rom).expect("verified USA or EUR image");
         let mut cases=0;
         for bank in [0u32,1] {
             for (x,y) in [(100,70),(-40,70),(300,70),(700,70),(100,180),(100,-40)] {
                 for flip in [0,1] {
                     let mut m=Machine::new(rom.clone());
                     m.bus.ffta_sprites.enabled=false;
-                    m.bus.iwram[0x65a8..0x68a4].copy_from_slice(&rom[crate::ffta_rom::RAM_SOURCE_START..crate::ffta_rom::RAM_SOURCE_END]);
-                    m.bus.iwram[0x6d28..0x6d58].copy_from_slice(&rom[0xa398dc..0xa3990c]);
+                    m.bus.iwram[0x65a8..0x68a4].copy_from_slice(&rom[profile.ram_source.0..profile.ram_source.1]);
+                    m.bus.iwram[0x6d28..0x6d58].copy_from_slice(&rom[profile.dims_source.0..profile.dims_source.1]);
                     m.bus.write8(0x03000028,bank as u8);
                     m.bus.write32(0x03000020+bank*4,0);
                     m.cpu.cpsr |= crate::cpu::FLAG_T;

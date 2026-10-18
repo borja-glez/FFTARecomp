@@ -19,7 +19,7 @@
 
 ## ✨ What is this?
 
-**FFTARecomp** turns *Final Fantasy Tactics Advance* (USA version) into a native program for Windows, Linux and Steam Deck. Instead of running in an emulator, the game is recompiled from your own ROM, so it runs smoothly, needs no BIOS, and gets modern options. It is based on [gba-recomp](https://github.com/JRickey/gba-recomp) by JRickey.
+**FFTARecomp** turns *Final Fantasy Tactics Advance* (USA or Europe version) into a native program for Windows, Linux and Steam Deck. Instead of running in an emulator, the game is recompiled from your own ROM, so it runs smoothly, needs no BIOS, and gets modern options. It is based on [gba-recomp](https://github.com/JRickey/gba-recomp) by JRickey.
 
 ## 🆕 What's new in v2.0
 
@@ -108,7 +108,7 @@ mkdir -p FFTARecomp-linux && tar -xzf FFTARecomp-linux-x86_64.tar.gz -C FFTAReco
 
 On Steam Deck, run it from Desktop Mode.
 
-> 💡 You need your own copy of *Final Fantasy Tactics Advance (USA)*. This project does not include any game data.
+> 💡 You need your own copy of *Final Fantasy Tactics Advance (USA)* or *(Europe) (En,Fr,De,Es,It)*. This project does not include any game data.
 
 ## 🔨 Building from source
 

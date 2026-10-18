@@ -25,7 +25,10 @@ const TEXT_DIM: Color32 = Color32::from_rgb(0x8B, 0x8B, 0x96);
 const OK: Color32 = Color32::from_rgb(0x4C, 0xD1, 0x7E);
 const ERR: Color32 = Color32::from_rgb(0xE5, 0x5B, 0x5B);
 
-const KNOWN_SHA1: &[&str] = &["4ac05441f4de70a4ec3dd932116346c61b8783d9"]; // USA
+const KNOWN_SHA1: &[&str] = &[
+    "4ac05441f4de70a4ec3dd932116346c61b8783d9", // USA
+    "9efaf328cbbcbc830be14940e42e4b92d90dfb58", // Europe (En,Fr,De,Es,It)
+];
 
 const ROM_FILE: &str = "ffta.gba";
 const PLAYER_EXE: &str = platform::PLAYER;
@@ -356,7 +359,7 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 fn validate_rom(path: &Path) -> Result<String, String> {
     let data = std::fs::read(path).map_err(|e| format!("Could not read the file: {e}"))?;
     match rom_policy::plan(&data)? {
-        rom_policy::InstallPlan::Verified => Ok("ROM verified (SHA1, SHA256 and all hook bytes)".into()),
+        rom_policy::InstallPlan::Verified(region) => Ok(format!("{region} ROM verified (SHA1, SHA256 and all hook bytes)")),
         rom_policy::InstallPlan::Unpatched(message) => Ok(message),
     }
 }
@@ -491,9 +494,9 @@ impl App {
             rich(ui, &[
                 ("A ROM is required. ", true),
                 ("Provide your own copy of ", false),
-                ("Final Fantasy Tactics Advance (USA)", true),
+                ("Final Fantasy Tactics Advance", true),
                 (", the ", false),
-                ("United States version", true),
+                ("United States (USA) or European (Europe) version", true),
                 (". For licensing reasons no game data is included or distributed, and your ROM \
                   never leaves your PC.\n", false),
             ]);

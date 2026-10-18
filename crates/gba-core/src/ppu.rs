@@ -296,12 +296,10 @@ pub(crate) enum FftaBgEdge { Wrap, Transparent, Clamp }
 
 impl FftaBgEdge {
     pub(crate) fn for_rom(rom: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
         if std::env::var("FFTA_PATCH_BG").as_deref() == Ok("0") {
             return Self::Wrap;
         }
-        let hash: String = Sha256::digest(rom).iter().map(|b| format!("{b:02x}")).collect();
-        if hash != "43fc8204c6dceee58828aebc7af0c72eb807e99f35ad641c8bb0a4fa8b6edc19" {
+        if crate::ffta_rom::profile(rom).is_none() {
             return Self::Wrap;
         }
         match std::env::var("FFTA_BG_EDGE").as_deref() {
